@@ -357,6 +357,9 @@ function twth_health_vuln_fetch( $type, $slug ) {
 	}
 	$key    = 'twth_vuln_' . md5( $type . '/' . $slug );
 	$cached = get_transient( $key );
+	if ( 'not_found' === $cached ) {
+		return false;
+	}
 	if ( is_array( $cached ) ) {
 		return $cached;
 	}
@@ -366,9 +369,9 @@ function twth_health_vuln_fetch( $type, $slug ) {
 	}
 	$code = (int) wp_remote_retrieve_response_code( $res );
 	if ( 404 === $code ) {
-		// Not in the database (custom or child theme, private plugin): nothing known.
-		set_transient( $key, array(), 20 * HOUR_IN_SECONDS );
-		return array();
+		// Not in the database: a custom or child theme, a private plugin, or a renamed folder.
+		set_transient( $key, 'not_found', 20 * HOUR_IN_SECONDS );
+		return false;
 	}
 	if ( 200 !== $code ) {
 		return null;
@@ -436,6 +439,7 @@ function twth_health_vuln_item( $v, $type, $slug, $name, $version, $active ) {
 function twth_health_vulnerabilities( $inventory ) {
 	$found     = array();
 	$unchecked = array();
+	$not_found = array();
 	$deadline  = microtime( true ) + 90;
 
 	$wp = get_bloginfo( 'version' );
@@ -471,6 +475,10 @@ function twth_health_vulnerabilities( $inventory ) {
 			$unchecked[] = $type . ':' . $slug;
 			continue;
 		}
+		if ( false === $list ) {
+			$not_found[] = $type . ':' . $slug;
+			continue;
+		}
 		foreach ( $list as $v ) {
 			if ( twth_health_vuln_applies( $v, $version ) ) {
 				$found[] = twth_health_vuln_item( $v, $type, $slug, $name, $version, $active );
@@ -494,6 +502,8 @@ function twth_health_vulnerabilities( $inventory ) {
 		'by_severity' => $counts,
 		'items'     => $found,
 		'unchecked' => $unchecked,
+		'not_found' => $not_found, // Not in the database at all; check for renamed folders.
+
 	);
 }
 
@@ -742,6 +752,9 @@ function twth_health_format( $r ) {
 	}
 	if ( $vu['unchecked'] ) {
 		$l[] = '  Not checked (lookup failed): ' . implode( ', ', $vu['unchecked'] );
+	}
+	if ( ! empty( $vu['not_found'] ) ) {
+		$l[] = '  Not in the vulnerability database (custom, child theme, private or renamed folder): ' . implode( ', ', $vu['not_found'] );
 	}
 	if ( ! $r['guard']['installed'] ) {
 		$l[] = '  ! Guard (mu-plugin) is missing: the report plugin can be deactivated.';
