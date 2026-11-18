@@ -3,7 +3,7 @@
  * Plugin Name:       TWTH Site Health Report
  * Plugin URI:        https://twthconsulting.com/
  * Description:       Read-only daily health, security and vulnerability report, emailed to TWTH Consulting. Changes nothing on the site. Updates itself from GitHub.
- * Version:           1.3.0
+ * Version:           1.3.1
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            TWTH Consulting
@@ -351,14 +351,27 @@ function twth_health_pending_updates() {
 const TWTH_HEALTH_VULN_API = 'https://www.wpvulnerability.net/';
 
 function twth_health_vuln_fetch( $type, $slug ) {
+	if ( 'core' !== $type ) {
+		// The database uses lowercase slugs: "Avada" must be looked up as "avada".
+		$slug = sanitize_title( $slug );
+	}
 	$key    = 'twth_vuln_' . md5( $type . '/' . $slug );
 	$cached = get_transient( $key );
 	if ( is_array( $cached ) ) {
 		return $cached;
 	}
 	$res = wp_remote_get( TWTH_HEALTH_VULN_API . $type . '/' . rawurlencode( $slug ) . '/', array( 'timeout' => 8 ) );
-	if ( is_wp_error( $res ) || 200 !== wp_remote_retrieve_response_code( $res ) ) {
+	if ( is_wp_error( $res ) ) {
 		return null; // Lookup failed; reported as "not checked".
+	}
+	$code = (int) wp_remote_retrieve_response_code( $res );
+	if ( 404 === $code ) {
+		// Not in the database (custom or child theme, private plugin): nothing known.
+		set_transient( $key, array(), 20 * HOUR_IN_SECONDS );
+		return array();
+	}
+	if ( 200 !== $code ) {
+		return null;
 	}
 	$json = json_decode( wp_remote_retrieve_body( $res ), true );
 	$list = ( is_array( $json ) && isset( $json['data']['vulnerability'] ) && is_array( $json['data']['vulnerability'] ) ) ? $json['data']['vulnerability'] : array();
@@ -499,7 +512,7 @@ function twth_health_collect() {
 
 	$r = array(
 		'report_version' => 3,
-		'plugin_version' => '1.3.0',
+		'plugin_version' => '1.3.1',
 		'site'           => home_url(),
 		'generated_gmt'  => gmdate( 'Y-m-d H:i:s' ),
 		'wp_version'     => get_bloginfo( 'version' ),
