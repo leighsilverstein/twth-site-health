@@ -3,7 +3,7 @@
  * Plugin Name:       TWTH Site Health Report
  * Plugin URI:        https://twthconsulting.com/
  * Description:       Read-only daily health, security and vulnerability report, emailed to TWTH Consulting. Changes nothing on the site. Updates itself from GitHub.
- * Version:           1.3.1
+ * Version:           1.3.2
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            TWTH Consulting
@@ -90,7 +90,7 @@ add_action( 'init', function () {
 // and emails an alert if this plugin is deactivated or its files disappear.
 // ---------------------------------------------------------------------------
 
-const TWTH_HEALTH_GUARD_REQUIRED = 1;
+const TWTH_HEALTH_GUARD_REQUIRED = 2;
 
 function twth_health_guard_path() {
 	return WPMU_PLUGIN_DIR . '/twth-site-health-guard.php';
@@ -139,8 +139,8 @@ add_action( 'init', function () {
 	}
 	set_transient( 'twth_health_guard_alerted', 1, DAY_IN_SECONDS );
 	\$to   = defined( 'TWTH_HEALTH_TO' ) ? TWTH_HEALTH_TO : '{$to}';
-	\$host = wp_parse_url( home_url(), PHP_URL_HOST );
-	wp_mail( \$to, '[TWTH Site Health] ALERT ' . \$host . ' - monitoring plugin removed', "The TWTH Site Health Report plugin files are missing on " . home_url() . ".\\nDaily reports have stopped. Reinstall the plugin, and check who removed it." );
+	\$host = preg_replace( '/^www\\./i', '', (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+	wp_mail( \$to, '[TWTH Site Health] ALERT ' . \$host . ' - monitoring plugin removed', "The TWTH Site Health Report plugin files are missing on " . home_url() . ".\\nDaily reports have stopped. Reinstall the plugin, and check who removed it.", array( 'From: TWTH Site Health <sitehealth@' . \$host . '>' ) );
 } );
 PHP;
 }
@@ -186,7 +186,8 @@ register_deactivation_hook( __FILE__, function () {
 	wp_mail(
 		TWTH_HEALTH_TO,
 		'[TWTH Site Health] ALERT ' . $host . ' - monitoring plugin deactivated',
-		'The TWTH Site Health Report plugin was deactivated on ' . home_url() . ' at ' . wp_date( 'Y-m-d H:i T' ) . ".\nDeactivated by: {$who}\nDaily reports will stop until it is reactivated."
+		'The TWTH Site Health Report plugin was deactivated on ' . home_url() . ' at ' . wp_date( 'Y-m-d H:i T' ) . ".\nDeactivated by: {$who}\nDaily reports will stop until it is reactivated.",
+		twth_health_mail_headers()
 	);
 } );
 
@@ -377,7 +378,15 @@ function twth_health_vuln_fetch( $type, $slug ) {
 		return null;
 	}
 	$json = json_decode( wp_remote_retrieve_body( $res ), true );
-	$list = ( is_array( $json ) && isset( $json['data']['vulnerability'] ) && is_array( $json['data']['vulnerability'] ) ) ? $json['data']['vulnerability'] : array();
+	if ( ! is_array( $json ) ) {
+		return null; // Unreadable reply; reported as "not checked".
+	}
+	// The API answers 200 even for names it doesn't know: it then sets "error" or sends an empty record.
+	if ( ! empty( $json['error'] ) || empty( $json['data'] ) || ( 'core' !== $type && empty( $json['data']['name'] ) ) ) {
+		set_transient( $key, 'not_found', 20 * HOUR_IN_SECONDS );
+		return false;
+	}
+	$list = ( isset( $json['data']['vulnerability'] ) && is_array( $json['data']['vulnerability'] ) ) ? $json['data']['vulnerability'] : array();
 	set_transient( $key, $list, 20 * HOUR_IN_SECONDS );
 	return $list;
 }
@@ -444,6 +453,9 @@ function twth_health_vulnerabilities( $inventory ) {
 
 	$wp = get_bloginfo( 'version' );
 	$core = twth_health_vuln_fetch( 'core', $wp );
+	if ( false === $core ) {
+		$core = array(); // No record for this WordPress version: nothing known against it.
+	}
 	if ( null === $core ) {
 		$unchecked[] = 'core';
 	} else {
@@ -522,7 +534,7 @@ function twth_health_collect() {
 
 	$r = array(
 		'report_version' => 3,
-		'plugin_version' => '1.3.1',
+		'plugin_version' => '1.3.2',
 		'site'           => home_url(),
 		'generated_gmt'  => gmdate( 'Y-m-d H:i:s' ),
 		'wp_version'     => get_bloginfo( 'version' ),
@@ -868,6 +880,21 @@ function twth_health_format( $r ) {
 	return implode( "\n", $l );
 }
 
+/**
+ * Send as "TWTH Site Health <sitehealth@site-domain>" rather than WordPress's default
+ * "WordPress <wordpress@...>", which many inbox filters delete or file away.
+ * An SMTP plugin that forces its own From address still takes precedence.
+ */
+function twth_health_mail_headers() {
+	$host = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+	$host = preg_replace( '/^www\./i', '', $host );
+	$headers = array( 'Content-Type: text/plain; charset=UTF-8' );
+	if ( $host && is_email( 'sitehealth@' . $host ) ) {
+		$headers[] = 'From: TWTH Site Health <sitehealth@' . $host . '>';
+	}
+	return $headers;
+}
+
 function twth_health_send() {
 	if ( ! is_email( TWTH_HEALTH_TO ) ) {
 		return false; // Recipient not configured; do nothing.
@@ -880,7 +907,7 @@ function twth_health_send() {
 		$top  = $vu['by_severity']['critical'] ? 'critical' : ( $vu['by_severity']['high'] ? 'high' : '' );
 		$subj .= sprintf( ' - AT RISK: %d known %s%s', $vu['count'], 1 === $vu['count'] ? 'vulnerability' : 'vulnerabilities', $top ? " ({$vu['by_severity'][ $top ]} {$top})" : '' );
 	}
-	return wp_mail( TWTH_HEALTH_TO, $subj, twth_health_format( $r ), array( 'Content-Type: text/plain; charset=UTF-8' ) );
+	return wp_mail( TWTH_HEALTH_TO, $subj, twth_health_format( $r ), twth_health_mail_headers() );
 }
 
 // ---------------------------------------------------------------------------
